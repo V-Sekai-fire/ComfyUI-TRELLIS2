@@ -76,6 +76,11 @@ def from_pretrained(path: str, disk_offload_manager=None, model_key: str = None,
     else:
         # Parse HuggingFace path
         path_parts = path.split('/')
+        if len(path_parts) < 3:
+            raise ValueError(
+                f"Invalid HuggingFace path format: {path}. "
+                f"Expected format: 'repo_owner/repo_name/model/path', got {len(path_parts)} parts."
+            )
         repo_id = f'{path_parts[0]}/{path_parts[1]}'
         model_name = '/'.join(path_parts[2:])
 

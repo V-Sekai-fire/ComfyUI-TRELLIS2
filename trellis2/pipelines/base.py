@@ -100,11 +100,26 @@ class Pipeline:
             else:
                 # Relative path, prepend the base repo
                 model_path = f"{path}/{v}"
-            _models[k] = models.from_pretrained(
-                model_path,
-                disk_offload_manager=disk_offload_manager,
-                model_key=k
-            )
+            try:
+                _models[k] = models.from_pretrained(
+                    model_path,
+                    disk_offload_manager=disk_offload_manager,
+                    model_key=k
+                )
+            except torch.cuda.OutOfMemoryError as e:
+                # Clear GPU cache and retry
+                torch.cuda.empty_cache()
+                gc.collect()
+                print(f"[ComfyUI-TRELLIS2] OutOfMemoryError occurred, cleared cache and retrying...")
+                _models[k] = models.from_pretrained(
+                    model_path,
+                    disk_offload_manager=disk_offload_manager,
+                    model_key=k
+                )
+            except Exception as e:
+                # For other exceptions, log and re-raise to see the actual error
+                print(f"[ComfyUI-TRELLIS2] Error loading {k}: {type(e).__name__}: {e}")
+                raise
             print(f"[ComfyUI-TRELLIS2] Loaded {k} successfully")
 
         new_pipeline = Pipeline(_models, disk_offload_manager=disk_offload_manager)

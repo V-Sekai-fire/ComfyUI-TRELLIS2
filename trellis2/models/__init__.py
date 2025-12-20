@@ -98,9 +98,15 @@ def from_pretrained(path: str, disk_offload_manager=None, model_key: str = None,
             model_file = local_weights
         else:
             from huggingface_hub import hf_hub_download
-            print(f"[ComfyUI-TRELLIS2]   Downloading {model_name} config...")
+            # Validate that we have a proper model_name before attempting download
+            if not model_name or model_name.strip() == '':
+                raise ValueError(
+                    f"Invalid model path: '{path}'. "
+                    f"Could not extract model_name. Path should be in format: 'repo_owner/repo_name/model/path'"
+                )
+            print(f"[ComfyUI-TRELLIS2]   Downloading {model_name} config from {repo_id}...")
             hf_config = hf_hub_download(repo_id, f"{model_name}.json")
-            print(f"[ComfyUI-TRELLIS2]   Downloading {model_name} weights...")
+            print(f"[ComfyUI-TRELLIS2]   Downloading {model_name} weights from {repo_id}...")
             hf_weights = hf_hub_download(repo_id, f"{model_name}.safetensors")
 
             # Copy to local models folder
@@ -115,15 +121,34 @@ def from_pretrained(path: str, disk_offload_manager=None, model_key: str = None,
         config = json.load(f)
 
     # Auto-detect device: prefer CUDA, fallback to CPU
+    import torch
     if device is None:
-        import torch
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     print(f"[ComfyUI-TRELLIS2]   Building model: {config['name']}")
     model = __getattr__(config['name'])(**config['args'], **kwargs)
     model.to(device)  # Move empty model to GPU before loading weights
     print(f"[ComfyUI-TRELLIS2]   Loading weights directly to {device}...")
-    model.load_state_dict(load_file(model_file, device=device), strict=False)
+    
+    # Handle OutOfMemoryError during weight loading
+    try:
+        model.load_state_dict(load_file(model_file, device=device), strict=False)
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        # Check if it's actually an OutOfMemoryError
+        if "out of memory" in str(e).lower() or isinstance(e, torch.cuda.OutOfMemoryError):
+            # Clear GPU cache and retry weight loading only
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            print(f"[ComfyUI-TRELLIS2]   OutOfMemoryError during weight loading, cleared cache and retrying...")
+            try:
+                model.load_state_dict(load_file(model_file, device=device), strict=False)
+            except Exception as retry_e:
+                print(f"[ComfyUI-TRELLIS2]   Retry failed: {retry_e}")
+                raise RuntimeError(f"Failed to load model weights after OutOfMemoryError: {retry_e}") from retry_e
+        else:
+            # Re-raise if it's not an OOM error
+            raise
 
     # Register with disk offload manager if provided
     if disk_offload_manager is not None:

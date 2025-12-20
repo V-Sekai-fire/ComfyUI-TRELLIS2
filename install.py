@@ -264,9 +264,56 @@ def find_cuda_home():
                 return cuda_home
 
     # Check system CUDA installations
+    # First, check for any cuda-* directories and use the newest one
+    cuda_base = "/usr/local"
+    if os.path.exists(cuda_base):
+        cuda_dirs = []
+        for item in os.listdir(cuda_base):
+            if item.startswith("cuda-") and os.path.isdir(os.path.join(cuda_base, item)):
+                cuda_path = os.path.join(cuda_base, item)
+                nvcc_path = os.path.join(cuda_path, "bin", "nvcc")
+                if os.path.exists(nvcc_path):
+                    cuda_dirs.append(cuda_path)
+        # Sort by version (newest first) - extract version number
+        def get_version(path):
+            version_str = os.path.basename(path).replace("cuda-", "")
+            try:
+                # Try to parse as float (e.g., "13.1" -> 13.1)
+                parts = version_str.split('.')
+                if len(parts) >= 2:
+                    return float(f"{parts[0]}.{parts[1]}")
+                elif len(parts) == 1:
+                    return float(parts[0])
+            except:
+                return 0.0
+            return 0.0
+        
+        # Prefer CUDA 12.x over 13.x for compatibility
+        # Separate CUDA 12.x and 13.x versions
+        cuda_12_dirs = [d for d in cuda_dirs if get_version(d) >= 12.0 and get_version(d) < 13.0]
+        cuda_13_dirs = [d for d in cuda_dirs if get_version(d) >= 13.0]
+        other_dirs = [d for d in cuda_dirs if get_version(d) < 12.0]
+        
+        # Sort each group (newest first)
+        cuda_12_dirs.sort(key=get_version, reverse=True)
+        cuda_13_dirs.sort(key=get_version, reverse=True)
+        other_dirs.sort(key=get_version, reverse=True)
+        
+        # Return CUDA 12.x first, then 13.x, then others
+        if cuda_12_dirs:
+            print(f"[ComfyUI-TRELLIS2] Using CUDA 12.x: {cuda_12_dirs[0]}")
+            return cuda_12_dirs[0]
+        elif cuda_13_dirs:
+            print(f"[ComfyUI-TRELLIS2] Using CUDA 13.x: {cuda_13_dirs[0]} (CUDA 12.x not found)")
+            return cuda_13_dirs[0]
+        elif other_dirs:
+            return other_dirs[0]
+    
+    # Fallback to specific versions (prefer CUDA 12.x)
     system_paths = [
-        "/usr/local/cuda-12.8", "/usr/local/cuda-12.6", "/usr/local/cuda-12.4",
-        "/usr/local/cuda-12.2", "/usr/local/cuda-12.0", "/usr/local/cuda",
+        "/usr/local/cuda-12.8", "/usr/local/cuda-12.6", "/usr/local/cuda-12.4", 
+        "/usr/local/cuda-12.2", "/usr/local/cuda-12.0", "/usr/local/cuda-13.1", 
+        "/usr/local/cuda-13.0", "/usr/local/cuda",
     ]
     for cuda_path in system_paths:
         if os.path.exists(cuda_path):
@@ -573,17 +620,83 @@ def _install_cuda_fedora(cuda_major, cuda_minor):
     if repo_version_used is None:
         repo_version_used = fedora_version_int
     
+    # Prefer CUDA 12.x over 13.x for compatibility with PyTorch CUDA 12.8
+    # Try to install CUDA 12.8 first (matching PyTorch), then fallback to other 12.x versions
+    cuda_12_versions = ["12.8", "12.6", "12.4", "12.2", "12.0"]
+    
     # For Fedora 42+, use cuda-toolkit; for older versions, use specific packages
     if repo_version_used >= 42:
         # Fedora 42+ uses cuda-toolkit package
-        packages = ["cuda-toolkit"]
+        # Try CUDA 12.x toolkit first (prefer 12.8 to match PyTorch)
+        packages = []
+        for cuda_12_ver in cuda_12_versions:
+            major, minor = cuda_12_ver.split('.')
+            # Try different package name formats
+            pkg_names = [
+                f"cuda-toolkit-{major}-{minor}",  # e.g., cuda-toolkit-12-8
+                f"cuda-{major}-{minor}",          # e.g., cuda-12-8
+                f"cuda-toolkit-{major}.{minor}",  # e.g., cuda-toolkit-12.8
+            ]
+            for pkg_name in pkg_names:
+                result = subprocess.run(
+                    ["dnf", "list", "available", pkg_name],
+                    capture_output=True, text=True, timeout=30
+                )
+                if pkg_name in result.stdout:
+                    packages = [pkg_name]
+                    print(f"[ComfyUI-TRELLIS2] Installing CUDA 12.{minor} toolkit ({pkg_name})")
+                    break
+            if packages:
+                break
+        
+        # If CUDA 12.x not available, try installing individual CUDA 12.x components
+        if not packages:
+            print("[ComfyUI-TRELLIS2] CUDA 12.x toolkit packages not found, trying individual components...")
+            for cuda_12_ver in cuda_12_versions:
+                major, minor = cuda_12_ver.split('.')
+                pkg_nvcc = f"cuda-nvcc-{major}-{minor}"
+                pkg_cudart = f"cuda-cudart-devel-{major}-{minor}"
+                result = subprocess.run(
+                    ["dnf", "list", "available", pkg_nvcc, pkg_cudart],
+                    capture_output=True, text=True, timeout=30
+                )
+                if pkg_nvcc in result.stdout and pkg_cudart in result.stdout:
+                    packages = [pkg_nvcc, pkg_cudart]
+                    print(f"[ComfyUI-TRELLIS2] Installing CUDA 12.{minor} components (nvcc + cudart-devel)")
+                    break
+        
+        # Fallback to latest if CUDA 12 not available
+        if not packages:
+            packages = ["cuda-toolkit"]
+            print("[ComfyUI-TRELLIS2] [WARNING] CUDA 12.x not available in repository")
+            print("[ComfyUI-TRELLIS2] [WARNING] Installing latest CUDA toolkit (may be CUDA 13.x)")
+            print("[ComfyUI-TRELLIS2] [WARNING] This may cause compatibility issues with PyTorch CUDA 12.8")
     else:
         # Fedora 39+: Use specific CUDA packages
-        # Package names format: cuda-nvcc-{major}-{minor}, cuda-cudart-devel-{major}-{minor}
-        packages = [
-            f"cuda-nvcc-{cuda_major}-{cuda_minor}",
-            f"cuda-cudart-devel-{cuda_major}-{cuda_minor}",
-        ]
+        # Try CUDA 12.x first (prefer 12.8 to match PyTorch)
+        packages = []
+        for cuda_12_ver in cuda_12_versions:
+            major, minor = cuda_12_ver.split('.')
+            pkg_nvcc = f"cuda-nvcc-{major}-{minor}"
+            pkg_cudart = f"cuda-cudart-devel-{major}-{minor}"
+            # Check if packages exist
+            result = subprocess.run(
+                ["dnf", "list", "available", pkg_nvcc, pkg_cudart],
+                capture_output=True, text=True, timeout=30
+            )
+            if pkg_nvcc in result.stdout and pkg_cudart in result.stdout:
+                packages = [pkg_nvcc, pkg_cudart]
+                print(f"[ComfyUI-TRELLIS2] Installing CUDA 12.{minor} components")
+                break
+        
+        # Fallback to requested version if CUDA 12 not available
+        if not packages:
+            packages = [
+                f"cuda-nvcc-{cuda_major}-{cuda_minor}",
+                f"cuda-cudart-devel-{cuda_major}-{cuda_minor}",
+            ]
+            print(f"[ComfyUI-TRELLIS2] [WARNING] CUDA 12.x not available, installing CUDA {cuda_major}.{cuda_minor}")
+            print(f"[ComfyUI-TRELLIS2] [WARNING] This may cause compatibility issues with PyTorch CUDA 12.8")
 
     print(f"[ComfyUI-TRELLIS2] Installing: {', '.join(packages)}")
     try:
@@ -978,6 +1091,94 @@ def clone_and_init_submodules(git_url, target_dir):
         return None
 
 
+def try_install_compatible_gcc():
+    """
+    Try to install a CUDA-compatible GCC version (12 or 13) on Fedora.
+    Returns (gcc_path, gxx_path) if successful, (None, None) otherwise.
+    """
+    if sys.platform != "linux":
+        return None, None
+    
+    distro = detect_linux_distro()
+    if distro != "fedora":
+        return None, None
+    
+    # Check if GCC 12 or 13 is already installed
+    for gcc_ver in ["12", "13"]:
+        gcc_path = shutil.which(f"gcc-{gcc_ver}")
+        gxx_path = shutil.which(f"g++-{gcc_ver}")
+        if gcc_path and gxx_path:
+            return gcc_path, gxx_path
+    
+    # Try to install GCC 12 or 13
+    print("[ComfyUI-TRELLIS2] Attempting to install CUDA-compatible GCC version...")
+    print("[ComfyUI-TRELLIS2] This requires sudo access.")
+    
+    # First, try installing from COPR repository (recommended by RPM Fusion)
+    # See: https://rpmfusion.org/Howto/CUDA#GCC_version
+    try:
+        print("[ComfyUI-TRELLIS2] Trying COPR repository for CUDA-compatible GCC...")
+        # Enable COPR repository for CUDA GCC (kwizart/cuda-gcc-10.1)
+        # This provides gcc-12/gcc-13 compatible with CUDA
+        result = subprocess.run(
+            ["sudo", "dnf", "copr", "enable", "-y", "kwizart/cuda-gcc-10.1"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            # Try to install cuda-gcc and cuda-gcc-c++
+            for pkg_name in ["cuda-gcc", "cuda-gcc-c++"]:
+                install_result = subprocess.run(
+                    ["sudo", "dnf", "install", "-y", "-q", pkg_name],
+                    capture_output=True, text=True, timeout=300
+                )
+                if install_result.returncode == 0:
+                    # Check if cuda-gcc is available
+                    cuda_gcc = shutil.which("cuda-gcc")
+                    cuda_gxx = shutil.which("cuda-g++")
+                    if cuda_gcc and cuda_gxx:
+                        print(f"[ComfyUI-TRELLIS2] [OK] Installed CUDA-compatible GCC from COPR")
+                        return cuda_gcc, cuda_gxx
+    except Exception as e:
+        print(f"[ComfyUI-TRELLIS2] COPR repository setup failed: {e}")
+    
+    # Fallback: Try to install GCC 12 or 13 from standard repositories
+    for gcc_ver in ["12", "13"]:
+        # Try different package name formats
+        package_names = [
+            [f"gcc-{gcc_ver}", f"gcc-c++-{gcc_ver}"],
+            [f"gcc{gcc_ver}", f"gcc-c++{gcc_ver}"],
+        ]
+        
+        for packages in package_names:
+            try:
+                # First check if packages are available
+                check_result = subprocess.run(
+                    ["dnf", "list", "available"] + packages,
+                    capture_output=True, text=True, timeout=30
+                )
+                if all(pkg in check_result.stdout for pkg in packages):
+                    # Packages available, try to install
+                    result = subprocess.run(
+                        ["sudo", "dnf", "install", "-y", "-q"] + packages,
+                        capture_output=True, text=True, timeout=300
+                    )
+                    if result.returncode == 0:
+                        gcc_path = shutil.which(f"gcc-{gcc_ver}")
+                        gxx_path = shutil.which(f"g++-{gcc_ver}")
+                        if gcc_path and gxx_path:
+                            print(f"[ComfyUI-TRELLIS2] [OK] Installed and using GCC {gcc_ver}")
+                            return gcc_path, gxx_path
+            except Exception as e:
+                continue
+    
+    print("[ComfyUI-TRELLIS2] Could not install compatible GCC version")
+    print("[ComfyUI-TRELLIS2] You may need to install manually:")
+    print("[ComfyUI-TRELLIS2]   sudo dnf copr enable -y kwizart/cuda-gcc-10.1")
+    print("[ComfyUI-TRELLIS2]   sudo dnf install -y cuda-gcc cuda-gcc-c++")
+    print("[ComfyUI-TRELLIS2] Or install GCC 12/13 from standard repositories if available")
+    return None, None
+
+
 def try_compile_from_source(package_name, git_url):
     """
     Try compiling a package from source.
@@ -1012,8 +1213,49 @@ def try_compile_from_source(package_name, git_url):
             print(f"[ComfyUI-TRELLIS2] Or run ComfyUI from 'Developer Command Prompt for VS'")
             return False
     else:
-        gcc = shutil.which("gcc-11") or shutil.which("gcc")
-        gxx = shutil.which("g++-11") or shutil.which("g++")
+        # Try to find a compatible GCC version
+        # CUDA typically supports GCC up to version 12-13, but GCC 15 might be too new
+        # Try cuda-gcc (from COPR), then gcc-12, gcc-13, gcc-11, then fallback to system gcc
+        gcc = None
+        gxx = None
+        gcc_version_too_new = False
+        
+        for gcc_name in ["cuda-gcc", "gcc-12", "gcc-13", "gcc-11", "gcc"]:
+            gcc_path = shutil.which(gcc_name)
+            if gcc_path:
+                gxx_name = gcc_name.replace("gcc", "g++")
+                gxx_path = shutil.which(gxx_name)
+                if gxx_path:
+                    # Check GCC version
+                    try:
+                        result = subprocess.run([gcc_path, "--version"], capture_output=True, text=True, timeout=5)
+                        version_line = result.stdout.split('\n')[0] if result.stdout else ""
+                        print(f"[ComfyUI-TRELLIS2] Using {gcc_name}: {version_line[:80]}")
+                        # Check if GCC version is too new (15+)
+                        if "15." in version_line or "16." in version_line:
+                            gcc_version_too_new = True
+                            print(f"[ComfyUI-TRELLIS2] [WARNING] GCC 15+ detected. CUDA may not support this version.")
+                            # Try to install compatible GCC
+                            compatible_gcc, compatible_gxx = try_install_compatible_gcc()
+                            if compatible_gcc and compatible_gxx:
+                                gcc = compatible_gcc
+                                gxx = compatible_gxx
+                                print(f"[ComfyUI-TRELLIS2] Using compatible GCC: {gcc}")
+                                break
+                            else:
+                                print(f"[ComfyUI-TRELLIS2] [WARNING] Compilation may fail. Consider installing gcc-12 or gcc-13 manually:")
+                                print(f"[ComfyUI-TRELLIS2] [WARNING]   sudo dnf install -y gcc-12 gcc-c++-12")
+                                # Still use the too-new GCC as fallback
+                                gcc = gcc_path
+                                gxx = gxx_path
+                        else:
+                            gcc = gcc_path
+                            gxx = gxx_path
+                    except:
+                        gcc = gcc_path
+                        gxx = gxx_path
+                    break
+        
         if not gxx:
             print(f"[ComfyUI-TRELLIS2] g++ compiler not found.")
             print(f"[ComfyUI-TRELLIS2] To install build tools, run: python install_compilers.py")
@@ -1022,6 +1264,10 @@ def try_compile_from_source(package_name, git_url):
             cuda_env["CC"] = gcc
         if gxx:
             cuda_env["CXX"] = gxx
+            # If using cuda-gcc, set HOST_COMPILER as recommended by RPM Fusion
+            if "cuda-gcc" in gcc or "cuda-g++" in gxx:
+                cuda_env["HOST_COMPILER"] = gxx
+                os.environ["HOST_COMPILER"] = gxx
 
     print(f"[ComfyUI-TRELLIS2] Compiling {package_name} from source (this may take several minutes)...")
 
@@ -1064,7 +1310,18 @@ def try_compile_from_source(package_name, git_url):
             else:
                 print(f"[ComfyUI-TRELLIS2] Compilation failed for {package_name}")
                 if result.stderr:
-                    print(f"[ComfyUI-TRELLIS2] Error: {result.stderr[:500]}")
+                    # Show more of the error (up to 2000 chars) to help diagnose issues
+                    error_output = result.stderr
+                    print(f"[ComfyUI-TRELLIS2] Error output ({len(error_output)} chars):")
+                    print(error_output[:2000])
+                    if len(error_output) > 2000:
+                        print(f"[ComfyUI-TRELLIS2] ... (truncated, {len(error_output) - 2000} more chars)")
+                if result.stdout:
+                    # Also check stdout for errors
+                    stdout_output = result.stdout
+                    if "error" in stdout_output.lower() or "failed" in stdout_output.lower():
+                        print(f"[ComfyUI-TRELLIS2] Error in stdout:")
+                        print(stdout_output[-1000:])  # Last 1000 chars often contain the actual error
                 return False
 
     print(f"[ComfyUI-TRELLIS2] Compilation failed for {package_name}")

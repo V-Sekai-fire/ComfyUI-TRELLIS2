@@ -15,8 +15,56 @@ import sys
 import os
 
 
+def detect_linux_distro():
+    """
+    Detect Linux distribution.
+    Returns 'fedora', 'debian', 'ubuntu', or None.
+    """
+    if sys.platform != "linux":
+        return None
+    
+    # Check /etc/os-release (most reliable)
+    try:
+        with open("/etc/os-release", "r") as f:
+            content = f.read()
+            if "fedora" in content.lower():
+                return "fedora"
+            elif "debian" in content.lower():
+                return "debian"
+            elif "ubuntu" in content.lower():
+                return "ubuntu"
+    except (FileNotFoundError, IOError):
+        pass
+    
+    # Fallback: check for distribution-specific files
+    if os.path.exists("/etc/fedora-release"):
+        return "fedora"
+    elif os.path.exists("/etc/debian_version"):
+        return "debian"
+    elif os.path.exists("/etc/lsb-release"):
+        try:
+            with open("/etc/lsb-release", "r") as f:
+                if "ubuntu" in f.read().lower():
+                    return "ubuntu"
+        except (FileNotFoundError, IOError):
+            pass
+    
+    return None
+
+
 def install_linux():
-    """Install build-essential (g++, make) on Linux via apt."""
+    """Install build tools (g++, make) on Linux via apt or dnf."""
+    distro = detect_linux_distro()
+    
+    if distro == "fedora":
+        return install_linux_fedora()
+    else:
+        # Default to Debian/Ubuntu (apt)
+        return install_linux_debian()
+
+
+def install_linux_debian():
+    """Install build-essential (g++, make) on Debian/Ubuntu via apt."""
     print("[TRELLIS2] Installing build-essential (g++, make)...")
     print("[TRELLIS2] This requires sudo access.")
 
@@ -50,6 +98,40 @@ def install_linux():
         print("[TRELLIS2] [FAILED] apt-get not found. Are you on a Debian/Ubuntu system?")
         print("[TRELLIS2] For other distros, install gcc/g++ manually:")
         print("[TRELLIS2]   Fedora/RHEL: sudo dnf install gcc gcc-c++")
+        print("[TRELLIS2]   Arch: sudo pacman -S base-devel")
+        return False
+    except Exception as e:
+        print(f"[TRELLIS2] [FAILED] Error: {e}")
+        return False
+
+
+def install_linux_fedora():
+    """Install gcc and gcc-c++ on Fedora via dnf."""
+    print("[TRELLIS2] Installing gcc and gcc-c++...")
+    print("[TRELLIS2] This requires sudo access.")
+
+    try:
+        # Install gcc and gcc-c++
+        result = subprocess.run(
+            ["sudo", "dnf", "install", "-y", "gcc", "gcc-c++", "make"],
+            timeout=300
+        )
+
+        if result.returncode == 0:
+            print("[TRELLIS2] [OK] Build tools installed successfully!")
+            print("[TRELLIS2] Now run: python install.py")
+            return True
+        else:
+            print("[TRELLIS2] [FAILED] Could not install build tools")
+            return False
+
+    except subprocess.TimeoutExpired:
+        print("[TRELLIS2] [FAILED] Installation timed out")
+        return False
+    except FileNotFoundError:
+        print("[TRELLIS2] [FAILED] dnf not found. Are you on a Fedora/RHEL system?")
+        print("[TRELLIS2] For other distros, install gcc/g++ manually:")
+        print("[TRELLIS2]   Debian/Ubuntu: sudo apt-get install build-essential")
         print("[TRELLIS2]   Arch: sudo pacman -S base-devel")
         return False
     except Exception as e:

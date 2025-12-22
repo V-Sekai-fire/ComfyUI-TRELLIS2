@@ -280,18 +280,19 @@ class VarLenTensor:
         if dim is None or 0 in dim:
             return red
 
-        # segment_reduce may lack CUDA kernel support on some platforms (especially Windows)
-        # Try CUDA first, fall back to CPU if kernel is missing
-        if red.is_cuda:
-            try:
-                red = torch.segment_reduce(red, reduce=op, lengths=self.seqlen)
-            except RuntimeError as e:
-                if "DispatchStub" in str(e) or "missing kernel" in str(e).lower():
-                    # CPU fallback for missing CUDA kernels (common on Windows PyTorch builds)
-                    red = torch.segment_reduce(red.cpu(), reduce=op, lengths=self.seqlen.cpu()).to(red.device)
-                else:
-                    raise
+        # segment_reduce lacks full CUDA kernel support for 'mean' and 'prod' operations
+        # Use CPU fallback for unsupported ops to avoid CUDA kernel errors
+        device = red.device
+        is_cuda = device.type == 'cuda'
+        
+        if is_cuda and op in ('mean', 'prod'):
+            # Move to CPU, perform segment_reduce, then move back to CUDA
+            red_cpu = red.cpu()
+            lengths_cpu = self.seqlen.cpu()
+            red_cpu = torch.segment_reduce(red_cpu, reduce=op, lengths=lengths_cpu)
+            red = red_cpu.to(device)
         else:
+            # For CPU or other operations, use segment_reduce directly
             red = torch.segment_reduce(red, reduce=op, lengths=self.seqlen)
         return red
     
